@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sales BI Assistant</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #fff; --text: #1d2330; --muted: #6b7280; --line: #e3e6eb;
+    --accent: #2563eb; --accent-soft: #e8efff; --err: #b42318; --err-soft: #fdecea;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
+  main { max-width: 860px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  form { display: flex; gap: 8px; }
+  input { flex: 1; padding: 11px 14px; border: 1px solid var(--line); border-radius: 8px; font-size: 15px; background: var(--card); }
+  input:focus { outline: 2px solid var(--accent); border-color: transparent; }
+  button { padding: 0 18px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .6; cursor: wait; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 24px; }
+  .chip { background: var(--card); color: var(--text); border: 1px solid var(--line); font-weight: 400; padding: 5px 10px; font-size: 13px; border-radius: 999px; }
+  .chip:hover { border-color: var(--accent); color: var(--accent); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; margin-bottom: 14px; }
+  .answer { font-size: 17px; font-weight: 500; }
+  .meta { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  .meta span { background: var(--accent-soft); color: var(--accent); padding: 1px 7px; border-radius: 4px; margin-right: 6px; }
+  .error { background: var(--err-soft); border-color: #f5c2bd; color: var(--err); }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  pre { background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 8px; overflow-x: auto; font-size: 12.5px; white-space: pre-wrap; }
+  ul { margin: 0; padding-left: 18px; color: var(--muted); font-size: 13.5px; }
+  details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  svg text { font-size: 11px; fill: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Sales BI Assistant</h1>
+  <p class="sub">Ask a question about the sales data. Every number comes from a database query, shown below the answer.</p>
+
+  <form id="ask">
+    <input id="q" placeholder="e.g. Which region generated the highest sales?" autocomplete="off" maxlength="500">
+    <button id="go">Ask</button>
+  </form>
+  <div class="chips" id="examples"></div>
+  <div id="out"></div>
+  <p class="meta" id="mode"></p>
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const fmt = (v) => typeof v === "number" ? v.toLocaleString("en-IN", { maximumFractionDigits: 2 }) : (v ?? "—");
+
+async function ask(question) {
+  $("#q").value = question;
+  $("#go").disabled = true;
+  $("#out").innerHTML = '<div class="card meta">Thinking…</div>';
+  try {
+    const res = await fetch("/api/ask", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question }) });
+    const body = await res.json();
+    $("#out").innerHTML = res.ok ? renderResult(body) : renderError(body.error);
+  } catch (e) {
+    $("#out").innerHTML = renderError({ message: "Could not reach the server." });
+  } finally {
+    $("#go").disabled = false;
+  }
+}
+
+function renderError(err) {
+  const tips = (err.suggestions || []).map((s) => `<li>${esc(s)}</li>`).join("");
+  return `<div class="card error"><div class="answer">${esc(err.message)}</div>${tips ? `<p>Try one of:</p><ul>${tips}</ul>` : ""}</div>`;
+}
+
+function renderResult(r) {
+  const { columns, rows } = r.data;
+  const head = columns.map((c) => `<th class="${typeof rows[0]?.[columns.indexOf(c)] === "number" ? "num" : ""}">${esc(c)}</th>`).join("");
+  const body = rows.map((row) => `<tr>${row.map((v) => `<td class="${typeof v === "number" ? "num" : ""}">${esc(fmt(v))}</td>`).join("")}</tr>`).join("");
+  const params = Object.keys(r.sql_params || {}).length ? `\n-- params: ${JSON.stringify(r.sql_params)}` : "";
+  return `
+    <div class="card">
+      <div class="answer">${esc(r.answer)}</div>
+      <div class="meta"><span>${esc(r.intent)}</span><span>interpreted by ${esc(r.interpreted_by)}</span></div>
+    </div>
+    ${r.chart ? `<div class="card"><h2>Chart</h2>${renderChart(r)}</div>` : ""}
+    <div class="card"><h2>Supporting data</h2><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>
+    <div class="card">
+      <h2>Assumptions</h2><ul>${r.assumptions.map((a) => `<li>${esc(a)}</li>`).join("")}</ul>
+      <details style="margin-top:12px"><summary>SQL executed</summary><pre>${esc(r.sql + params)}</pre></details>
+    </div>`;
+}
+
+function renderChart(r) {
+  const { columns, rows } = r.data;
+  const xi = columns.indexOf(r.chart.x), yi = columns.indexOf(r.chart.y);
+  const pts = rows.map((row) => ({ x: String(row[xi]), y: row[yi] }));
+  const W = 760, H = 220, P = { l: 70, r: 10, t: 10, b: 28 };
+  const max = Math.max(...pts.map((p) => p.y)) * 1.1 || 1;
+  const step = (W - P.l - P.r) / pts.length;
+  const y = (v) => H - P.b - (v / max) * (H - P.t - P.b);
+  const ticks = [0, .25, .5, .75, 1].map((f) => max * f);
+  let svg = ticks.map((t) => `<line x1="${P.l}" x2="${W - P.r}" y1="${y(t)}" y2="${y(t)}" stroke="#e3e6eb"/><text x="${P.l - 6}" y="${y(t) + 4}" text-anchor="end">${Math.round(t).toLocaleString("en-IN")}</text>`).join("");
+  if (r.chart.type === "line") {
+    const coords = pts.map((p, i) => `${P.l + step * (i + .5)},${y(p.y)}`);
+    svg += `<polyline points="${coords.join(" ")}" fill="none" stroke="#2563eb" stroke-width="2"/>`;
+    svg += pts.map((p, i) => `<circle cx="${P.l + step * (i + .5)}" cy="${y(p.y)}" r="3.5" fill="#2563eb"><title>${esc(p.x)}: ${fmt(p.y)}</title></circle>`).join("");
+  } else {
+    const bw = Math.min(56, step * .6);
+    svg += pts.map((p, i) => `<rect x="${P.l + step * (i + .5) - bw / 2}" y="${y(p.y)}" width="${bw}" height="${H - P.b - y(p.y)}" rx="3" fill="#2563eb"><title>${esc(p.x)}: ${fmt(p.y)}</title></rect>`).join("");
+  }
+  svg += pts.map((p, i) => `<text x="${P.l + step * (i + .5)}" y="${H - 8}" text-anchor="middle">${esc(p.x)}</text>`).join("");
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Revenue chart">${svg}</svg>`;
+}
+
+$("#ask").addEventListener("submit", (e) => { e.preventDefault(); const q = $("#q").value.trim(); if (q) ask(q); });
+
+fetch("/api/examples").then((r) => r.json()).then(({ examples }) => {
+  $("#examples").innerHTML = examples.map((q) => `<button class="chip" type="button">${esc(q)}</button>`).join("");
+  $("#examples").querySelectorAll(".chip").forEach((b) => b.addEventListener("click", () => ask(b.textContent)));
+});
+fetch("/api/health").then((r) => r.json()).then((h) => { $("#mode").textContent = `Interpreter mode: ${h.interpreter}`; });
+</script>
+</body>
+</html>
